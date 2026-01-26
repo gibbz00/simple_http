@@ -1,5 +1,6 @@
 .xmake/
 build/
+.cache/
 
 .vscode/*
 !.vscode/c_cpp_properties.json

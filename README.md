@@ -2,7 +2,9 @@
 
 ## Notable differences to upstream
 
+#### Tooling
 - Uses `xmake` as its build system and package manager.
+- Uses `clang-format` for consistent formatting.
 
 ## Require
 

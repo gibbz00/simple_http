@@ -1,0 +1,15 @@
+---
+BasedOnStyle: LLVM
+
+ColumnLimit: 120
+
+# params
+BinPackParameters: false
+ExperimentalAutoDetectBinPacking: true
+
+# class def
+IndentAccessModifiers: true
+
+# namespaces
+NamespaceIndentation: All
+FixNamespaceComments: false
