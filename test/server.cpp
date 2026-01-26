@@ -4,7 +4,8 @@
 #include <string>
 #include <thread>
 
-#include "simple_http.h"
+#include "simple_http/server.hpp"
+#include "simple_http/server_utils.hpp"
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;

@@ -8,7 +8,8 @@
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 
-#include "simple_http.h"
+#include "simple_http/client.hpp"
+#include "simple_http/client_utils.hpp"
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;
