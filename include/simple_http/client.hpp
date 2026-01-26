@@ -54,11 +54,11 @@ namespace simple_http {
 
   class HttpsClient final : public HttpClient, public std::enable_shared_from_this<HttpsClient> {
     public:
-      HttpsClient(std::string host, uint16_t port, std::shared_ptr<asio::io_context> ctx, int32_t timeout = 60)
-          : m_host(std::move(host)), m_port(port), m_ctx(std::move(ctx)), m_timeout(timeout),
+      HttpsClient(std::string host, uint16_t port, asio::io_context::executor_type io_context, int32_t timeout = 60)
+          : m_host(std::move(host)), m_port(port), m_io_context(io_context), m_timeout(timeout),
             m_ssl_context(asio::ssl::context::tlsv13_client) {
-        m_h2_channel = std::make_shared<Http2Channel>(*m_ctx, CHANNEL_SIZE);
-        m_req_channel = std::make_shared<ReqChannel>(*m_ctx, CHANNEL_SIZE);
+        m_h2_channel = std::make_shared<Http2Channel>(m_io_context, CHANNEL_SIZE);
+        m_req_channel = std::make_shared<ReqChannel>(m_io_context, CHANNEL_SIZE);
 
         m_ssl_context.set_verify_mode(SSL_VERIFY_PEER);
         m_ssl_context.set_default_verify_paths();
@@ -67,12 +67,12 @@ namespace simple_http {
       }
 
       asio::awaitable<bool> start() override {
-        co_await asio::dispatch(asio::bind_executor(m_ctx->get_executor(), asio::use_awaitable));
+        co_await asio::dispatch(asio::bind_executor(m_io_context, asio::use_awaitable));
 
         if (m_connected)
           co_return true;
 
-        auto solver = asio::ip::tcp::resolver(*m_ctx);
+        auto solver = asio::ip::tcp::resolver(m_io_context);
         auto [ec, results] =
             co_await solver.async_resolve(m_host, std::to_string(m_port), asio::as_tuple(asio::use_awaitable));
         if (ec) {
@@ -80,8 +80,8 @@ namespace simple_http {
           co_return false;
         }
 
-        asio::ip::tcp::socket socket(*m_ctx);
-        asio::steady_timer timer(*m_ctx);
+        asio::ip::tcp::socket socket(m_io_context);
+        asio::steady_timer timer(m_io_context);
         timer.expires_after(std::chrono::seconds(10));
         auto result = co_await (socket.async_connect(*(results.begin()), asio::as_tuple(asio::use_awaitable)) ||
                                 timer.async_wait(asio::as_tuple(asio::use_awaitable)));
@@ -130,7 +130,7 @@ namespace simple_http {
       }
 
       asio::awaitable<void> stop() override {
-        co_await asio::dispatch(asio::bind_executor(m_ctx->get_executor(), asio::use_awaitable));
+        co_await asio::dispatch(asio::bind_executor(m_io_context, asio::use_awaitable));
         if (m_socket) {
           shutdown(m_socket);
         }
@@ -247,7 +247,7 @@ namespace simple_http {
 
       asio::awaitable<std::shared_ptr<Channel>>
       sendRequest(std::shared_ptr<http::request<http::string_body>> req) override {
-        auto channel = std::make_shared<Channel>(*m_ctx, CHANNEL_SIZE);
+        auto channel = std::make_shared<Channel>(m_io_context, CHANNEL_SIZE);
         auto tp = std::make_tuple(std::move(req), channel);
         if (!m_req_channel->try_send(error_code{}, tp)) {
           auto [ec] = co_await m_req_channel->async_send(error_code{}, tp, asio::as_tuple(asio::use_awaitable));
@@ -337,13 +337,13 @@ namespace simple_http {
           }
           sp->m_streams.clear();
         };
-        asio::co_spawn(*m_ctx, func(m_socket, m_h2_channel, shared_from_this(), m_timeout), asio::detached);
+        asio::co_spawn(m_io_context, func(m_socket, m_h2_channel, shared_from_this(), m_timeout), asio::detached);
         co_return;
       }
 
       std::string m_host;
       uint16_t m_port;
-      std::shared_ptr<asio::io_context> m_ctx;
+      asio::io_context::executor_type m_io_context;
       int32_t m_timeout;
 
       asio::ssl::context m_ssl_context;

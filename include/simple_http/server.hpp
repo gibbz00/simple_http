@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <boost/asio/io_context.hpp>
 #include <cctype>
 #include <chrono>
 #include <cstddef>
@@ -144,8 +145,11 @@ namespace simple_http {
     co_return;
   }
 
-  inline void callHandler(const std::weak_ptr<HandlerFunctions> &hf, auto &io_dispatch, auto req, auto writer) {
-    asio::co_spawn(io_dispatch, callCallback(hf, std::move(req), std::move(writer)), [](const std::exception_ptr &ep) {
+  inline void callHandler(const std::weak_ptr<HandlerFunctions> &hf,
+                          asio::io_context::executor_type io_context,
+                          auto req,
+                          auto writer) {
+    asio::co_spawn(io_context, callCallback(hf, std::move(req), std::move(writer)), [](const std::exception_ptr &ep) {
       try {
         if (ep)
           std::rethrow_exception(ep);
@@ -171,10 +175,9 @@ namespace simple_http {
 
       Http2Parse(const std::shared_ptr<Http2Channel> &ch2,
                  const std::shared_ptr<Http1Channel> &ch1,
-                 auto io_context,
+                 asio::io_context::executor_type io_context,
                  const std::shared_ptr<HandlerFunctions> &handler_functions)
-          : m_h2_channel(ch2), m_h1_channel(ch1), m_io_dispatch(std::move(io_context)),
-            m_handler_functions(handler_functions) {}
+          : m_h2_channel(ch2), m_h1_channel(ch1), m_io_context(io_context), m_handler_functions(handler_functions) {}
 
       ~Http2Parse() {
         if (m_session) {
@@ -348,7 +351,7 @@ namespace simple_http {
           req->prepare_payload();
           auto writer = std::make_shared<HttpResponseWriter>(h2p->shared_from_this(), stream_id, Version::Http2);
           if (auto sp = h2p->m_h2_channel.lock()) {
-            callHandler(h2p->m_handler_functions, *h2p->m_io_dispatch, std::move(*req), std::move(writer));
+            callHandler(h2p->m_handler_functions, h2p->m_io_context, std::move(*req), std::move(writer));
           }
           h2p->erase(stream_id);
         };
@@ -398,7 +401,7 @@ namespace simple_http {
 
       std::weak_ptr<Http2Channel> m_h2_channel;
       std::weak_ptr<Http1Channel> m_h1_channel;
-      std::shared_ptr<asio::io_context> m_io_dispatch;
+      asio::io_context::executor_type m_io_context;
       nghttp2_session_callbacks *m_cbs{};
       nghttp2_session *m_session{};
       std::unordered_map<int32_t, std::shared_ptr<http::request<http::string_body>>> m_streams;
@@ -545,19 +548,8 @@ namespace simple_http {
 
   class HttpServer final {
     public:
-      HttpServer(const Config &cfg)
-          : m_cfg(cfg), m_ep(asio::ip::make_address(cfg.ip), cfg.port),
-            m_io_ctx_pool(std::make_shared<IoCtxPool>(cfg.worker_num)),
-            m_io_dispatch(std::make_shared<IoCtxPool>(cfg.worker_num)), m_stop_ctx_pool(true) {
-        initSsl();
-        m_io_ctx_pool->createMainContext();
-        m_io_ctx_pool->start();
-        m_io_dispatch->start();
-      }
-
-      HttpServer(const Config &cfg, std::shared_ptr<IoCtxPool> io_ctx_pool, std::shared_ptr<IoCtxPool> io_dispatch)
-          : m_cfg(cfg), m_ep(asio::ip::make_address(cfg.ip), cfg.port), m_io_ctx_pool(std::move(io_ctx_pool)),
-            m_io_dispatch(std::move(io_dispatch)), m_stop_ctx_pool(false) {
+      HttpServer(const Config &cfg, asio::io_context::executor_type io_context)
+          : m_cfg(cfg), m_ep(asio::ip::make_address(cfg.ip), cfg.port), m_io_context(io_context) {
         initSsl();
       }
 
@@ -567,7 +559,7 @@ namespace simple_http {
       HttpServer &operator=(HttpServer &&) = delete;
 
       asio::awaitable<void> start() {
-        m_acceptor = std::make_unique<asio::ip::tcp::acceptor>(*m_io_ctx_pool->getMainContext());
+        m_acceptor = std::make_unique<asio::ip::tcp::acceptor>(m_io_context);
         m_acceptor->open(m_ep.protocol());
         error_code ec;
         m_acceptor->set_option(asio::ip::tcp::acceptor::reuse_address(true));
@@ -582,8 +574,7 @@ namespace simple_http {
           throw std::runtime_error(ec.message());
         }
         for (;;) {
-          auto &context = m_io_ctx_pool->getIoContextPtr();
-          asio::ip::tcp::socket socket(*context);
+          asio::ip::tcp::socket socket(m_io_context);
           auto [ec] = co_await m_acceptor->async_accept(socket, asio::as_tuple(asio::use_awaitable));
           if (ec) {
             if (ec == asio::error::operation_aborted)
@@ -599,28 +590,24 @@ namespace simple_http {
           // socket.set_option(asio::socket_base::send_buffer_size(5024 *
           // 1024));
           if (m_cfg.ssl_crt.empty()) {
-            asio::co_spawn(
-                *context, session(std::make_shared<asio::ip::tcp::socket>(std::move(socket)), context), asio::detached);
+            asio::co_spawn(m_io_context,
+                           session(std::make_shared<asio::ip::tcp::socket>(std::move(socket)), m_io_context),
+                           asio::detached);
           } else {
             auto stream = std::make_shared<asio::ssl::stream<asio::ip::tcp::socket>>(std::move(socket), m_ssl_context);
-            asio::co_spawn(*context, startSslsession(std::move(stream), context), asio::detached);
+            asio::co_spawn(m_io_context, startSslsession(std::move(stream), m_io_context), asio::detached);
           }
         }
       }
 
       void stop() {
-        auto ctx = m_io_ctx_pool->getMainContext();
         std::promise<void> done;
-        asio::post(*ctx, [&] {
+        asio::post(m_io_context, [&] {
           if (m_acceptor)
             m_acceptor->close();
           done.set_value();
         });
         done.get_future().wait();
-        if (m_stop_ctx_pool) {
-          m_io_ctx_pool->stop();
-          m_io_dispatch->stop();
-        }
       }
 
       auto &setHttpHandler(const std::string &path,
@@ -648,8 +635,6 @@ namespace simple_http {
         m_handler_functions->setBefore(std::move(cb));
         return *this;
       }
-
-      auto ioDispatchPool() { return m_io_dispatch; }
 
     private:
       void initSsl() {
@@ -710,10 +695,7 @@ namespace simple_http {
             nullptr);
       }
 
-      asio::awaitable<void> upgradeH2c(auto socket,
-                                       const std::shared_ptr<asio::io_context> & /* ctx */,
-                                       http::request<http::string_body> req,
-                                       std::string settings) {
+      asio::awaitable<void> upgradeH2c(auto socket, http::request<http::string_body> req, std::string settings) {
         // nghttp --upgrade  http://127.0.0.1:6666/hello --data ./a.txt
         // curl -v --http2 http://localhost:6666/hello -d "aaaa" -k
         http::response<http::empty_body> res{http::status::switching_protocols, 11};
@@ -721,9 +703,8 @@ namespace simple_http {
         res.set(http::field::upgrade, "h2c");
         co_await http::async_write(*socket, res, asio::as_tuple(asio::use_awaitable));
 
-        auto &io_dispatch = m_io_dispatch->getIoContextPtr();
         auto ch = std::make_shared<Http2Channel>(co_await asio::this_coro::executor, CHANNEL_SIZE);
-        auto h2p = std::make_shared<Http2Parse>(ch, nullptr, io_dispatch, m_handler_functions);
+        auto h2p = std::make_shared<Http2Parse>(ch, nullptr, m_io_context, m_handler_functions);
         if (auto ret = h2p->init(Http2Parse::Config{
                 .is_h2c_upgrade = true,
                 .h2_setting = std::move(settings),
@@ -739,7 +720,7 @@ namespace simple_http {
 
         if (req.method() != http::verb::options) {
           callHandler(m_handler_functions,
-                      *io_dispatch,
+                      m_io_context,
                       std::move(req),
                       std::make_shared<HttpResponseWriter>(h2p, 1, Version::Http2));
         }
@@ -749,14 +730,10 @@ namespace simple_http {
         shutdown(socket);
       }
 
-      asio::awaitable<void>
-      switchH2c(auto socket, const std::shared_ptr<asio::io_context> & /* ctx */, const std::string &buffer) {
-        // curl -v --http2-prior-knowledge http://localhost:6666/hello
-        // curl -v --http2-prior-knowledge http://localhost:6666/hello -d "aaaa"
-        auto &io_dispatch = m_io_dispatch->getIoContextPtr();
+      asio::awaitable<void> switchH2c(auto socket, const std::string &buffer) {
         // start proc http2
         auto ch = std::make_shared<Http2Channel>(co_await asio::this_coro::executor, CHANNEL_SIZE);
-        auto h2p = std::make_shared<Http2Parse>(ch, nullptr, io_dispatch, m_handler_functions);
+        auto h2p = std::make_shared<Http2Parse>(ch, nullptr, m_io_context, m_handler_functions);
         if (auto ret = h2p->init(Http2Parse::Config{
                 .is_h2c_upgrade = false,
                 .h2_setting = "",
@@ -794,7 +771,7 @@ namespace simple_http {
             }
             auto version = (req.version() == 11 ? Version::Http11 : Version::Http1);
             callHandler(m_handler_functions,
-                        m_io_dispatch->getIoContext(),
+                        m_io_context,
                         std::move(req),
                         std::make_shared<HttpResponseWriter>(h2p, 0, version));
           }
@@ -840,9 +817,9 @@ namespace simple_http {
         co_return;
       }
 
-      asio::awaitable<void> session(auto socket, std::shared_ptr<asio::io_context> ctx) {
-        auto http1_ch = std::make_shared<Http1Channel>(*ctx, CHANNEL_SIZE);
-        auto h2p = std::make_shared<Http2Parse>(nullptr, http1_ch, nullptr, m_handler_functions);
+      asio::awaitable<void> session(auto socket, asio::io_context::executor_type io_context) {
+        auto http1_ch = std::make_shared<Http1Channel>(io_context, CHANNEL_SIZE);
+        auto h2p = std::make_shared<Http2Parse>(nullptr, http1_ch, m_io_context, m_handler_functions);
         beast::flat_buffer buffer;
         http::parser<true, http::string_body> parser;
         auto [ec, bytes] =
@@ -853,7 +830,7 @@ namespace simple_http {
         if (ec == http::error::bad_version) {
           auto req_str = beast::buffers_to_string(buffer.data());
           if (isHttp2(req_str)) {
-            co_await switchH2c(std::move(socket), ctx, req_str);
+            co_await switchH2c(std::move(socket), req_str);
           } else {
             SIMPLE_HTTP_ERROR_LOG("not http2 request");
           }
@@ -881,14 +858,14 @@ namespace simple_http {
         http::request<http::string_body> full_req = parser.get();
 
         if (!h2_setting.empty()) {
-          co_await upgradeH2c(std::move(socket), ctx, std::move(full_req), std::move(h2_setting));
+          co_await upgradeH2c(std::move(socket), std::move(full_req), std::move(h2_setting));
           co_return;
         }
 
         // this is http1 or 1.1
         auto version = (full_req.version() == 11 ? Version::Http11 : Version::Http1);
         callHandler(m_handler_functions,
-                    m_io_dispatch->getIoContext(),
+                    m_io_context,
                     std::move(full_req),
                     std::make_shared<HttpResponseWriter>(h2p, 0, version));
         co_await switchHttp1(std::move(socket), http1_ch, h2p, version);
@@ -898,21 +875,19 @@ namespace simple_http {
 
       // https server
       asio::awaitable<void> startSslsession(std::shared_ptr<asio::ssl::stream<asio::ip::tcp::socket>> socket,
-                                            auto context) {
+                                            asio::io_context::executor_type io_context) {
         if (auto [ec] = co_await socket->async_handshake(boost::asio::ssl::stream_base::server,
                                                          asio::as_tuple(asio::use_awaitable));
             ec) {
           SIMPLE_HTTP_DEBUG_LOG("async_handshake: {}", ec.message());
           co_return;
         }
-        asio::co_spawn(*context, session(std::move(socket), context), asio::detached);
+        asio::co_spawn(io_context, session(std::move(socket), io_context), asio::detached);
       }
 
       Config m_cfg;
       asio::ip::tcp::endpoint m_ep;
-      std::shared_ptr<IoCtxPool> m_io_ctx_pool;
-      std::shared_ptr<IoCtxPool> m_io_dispatch;
-      bool m_stop_ctx_pool;
+      asio::io_context::executor_type m_io_context;
       asio::ssl::context m_ssl_context{asio::ssl::context::tlsv13_server};
       std::unique_ptr<asio::ip::tcp::acceptor> m_acceptor;
       std::shared_ptr<HandlerFunctions> m_handler_functions = std::make_shared<HandlerFunctions>();

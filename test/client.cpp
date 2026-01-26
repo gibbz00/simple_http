@@ -1,3 +1,4 @@
+#include <boost/asio/io_context.hpp>
 #include <chrono>
 #include <iostream>
 #include <memory>
@@ -16,21 +17,17 @@ namespace beast = boost::beast;
 namespace http = beast::http;
 
 // export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
-asio::awaitable<void> client() {
-  static simple_http::IoCtxPool pool{2};
-  pool.start();
-
-  asio::steady_timer timer(*pool.getMainContext());
+asio::awaitable<void> client(asio::io_context::executor_type io_context) {
+  asio::steady_timer timer(io_context);
   timer.expires_after(std::chrono::seconds(3));
   co_await timer.async_wait();
 
   std::shared_ptr<simple_http::HttpClient> client =
-      std::make_shared<simple_http::HttpsClient>("learnrust.site", 6666, pool.getIoContextPtr());
+      std::make_shared<simple_http::HttpsClient>("learnrust.site", 6666, io_context);
   assert(co_await client->start());
 
-  auto ctx = pool.getMainContext();
   asio::co_spawn(
-      *ctx,
+      io_context,
       [=]() -> asio::awaitable<void> {
         auto req = simple_http::makeHttpRequest("/hello");
         req->set("X-Custom-Header", "value");
@@ -71,10 +68,10 @@ int main() {
   simple_http::LOG_CB = [](simple_http::LogLevel level, auto file, auto line, std::string msg) {
     std::cout << to_string(level) << " " << file << ":" << line << " " << msg << std::endl;
   };
-  simple_http::IoCtxPool pool{1};
-  pool.start();
-  asio::co_spawn(pool.getIoContext(), client(), asio::detached);
-  while (true)
-    sleep(1000);
-  return 0;
+
+  auto io_context = asio::io_context();
+
+  asio::co_spawn(io_context, client(io_context.get_executor()), asio::detached);
+
+  io_context.run();
 }

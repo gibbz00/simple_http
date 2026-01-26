@@ -5,6 +5,7 @@
 ### Features
 
 - Promotes the client to non-experimental status, effectively removing `_EXPERIMENT_HTTP_CLIENT_`.
+- Deprecates `IoCtxPool` so that asio's scheduler can to its thing.
 
 #### Tooling
 

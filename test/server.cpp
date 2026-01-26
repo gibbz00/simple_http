@@ -1,3 +1,4 @@
+#include <boost/asio/io_context.hpp>
 #include <chrono>
 #include <iostream>
 #include <ostream>
@@ -11,14 +12,14 @@ namespace asio = boost::asio;
 namespace beast = boost::beast;
 namespace http = beast::http;
 
-asio::awaitable<void> start() {
+asio::awaitable<void> start(asio::io_context::executor_type io_context) {
   simple_http::Config cfg{.ip = "0.0.0.0", .port = 7788, .worker_num = 8, .concurrent_streams = 200};
   // cfg.ssl_crt = "./v.crt";
   // cfg.ssl_key = "./v.key";
   simple_http::LOG_CB = [](simple_http::LogLevel level, auto file, auto line, std::string msg) {
     std::cout << to_string(level) << " " << file << ":" << line << " " << msg << std::endl;
   };
-  simple_http::HttpServer hs(cfg);
+  simple_http::HttpServer hs(cfg, io_context);
   hs.setHttpHandler("/hello",
                     [](http::request<http::string_body> req,
                        std::shared_ptr<simple_http::HttpResponseWriter> writer) -> asio::awaitable<void> {
@@ -85,9 +86,9 @@ asio::awaitable<void> start() {
 }
 
 int main() {
-  simple_http::IoCtxPool pool{1};
-  pool.start();
-  asio::co_spawn(pool.getIoContext(), start(), [](const std::exception_ptr &eptr) {
+  auto io_context = asio::io_context();
+
+  asio::co_spawn(io_context.get_executor(), start(io_context.get_executor()), [](const std::exception_ptr &eptr) {
     try {
       if (eptr)
         std::rethrow_exception(eptr);
@@ -95,7 +96,6 @@ int main() {
       std::cout << "Exception caught by co_spawn handler: " << e.what() << std::endl;
     }
   });
-  while (true)
-    std::this_thread::sleep_for(std::chrono::seconds(100));
-  return 0;
+
+  io_context.run();
 }
