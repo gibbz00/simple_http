@@ -1,6 +1,11 @@
 # simple_http
 
+## Notable differences to upstream
+
+- Uses `xmake` as its build system and package manager.
+
 ## Require
+
 * C++20
 * nghttp2
 * boost
