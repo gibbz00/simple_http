@@ -36,8 +36,8 @@
                 pkg-config
                 cmake
                 ninja
-                # for openssl package
-                # perl
+                # for openssl3 package
+                perl
                 # mostly for clangd, clang-format and clang-tidy
                 clang-tools
               ]
